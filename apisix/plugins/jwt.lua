@@ -74,12 +74,10 @@ local function fetch_jwt_token(ctx)
 end
 
 function _M.rewrite(conf, ctx)
-    core.log.info("conf info: ",
-            core.json.delay_encode(ctx.var, true))
-    core.log.info("args: ",ngx.var.args)
     local appkey = core.request.header(ctx, "appkey")
     if conf.appkey ~= appkey then
-        return 401 , {code = 100000,message = "invalid appkey"}
+        core.log.info("request appkey: ", appkey, " conf appkey:",conf.appkey)
+        return 400 , {code = 100000,message = "应用程序不存在或已被封禁"}
     end
 
     local jwt_token, err = fetch_jwt_token(ctx)
@@ -88,22 +86,21 @@ function _M.rewrite(conf, ctx)
             core.log.error("failed to fetch JWT token: ", err)
         end
 
-        return 401, {code = 100000,message = "Missing JWT token in request"}
+        return 401, {code = 100001,message = "Missing JWT token in request"}
     end
 
     local jwt_obj = jwt:load_jwt(jwt_token)
-    core.log.info("jwt object: ", core.json.delay_encode(jwt_obj))
     if not jwt_obj.valid then
-        return 401, {code = 100000,message = jwt_obj.reason}
+        return 401, {code = 100002,message = jwt_obj.reason}
     end
 
     local auth_secret = conf.secret
     jwt_obj = jwt:verify_jwt_obj(auth_secret, jwt_obj)
     core.log.info("jwt object: ", core.json.delay_encode(jwt_obj))
     if not jwt_obj.verified then
-        return 401, {code = 100000,message = jwt_obj.reason}
-    else
-        return 401, {code = 100000,message = core.json.encode(jwt_obj)}
+        return 401, {code = 100003,message = jwt_obj.reason}
+    --else
+    --    return 401, {code = 100000,message = core.json.encode(jwt_obj)}
     end
 
     core.log.info("hit customer jwt authorization rewrite")

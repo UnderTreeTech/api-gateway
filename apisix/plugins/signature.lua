@@ -81,13 +81,13 @@ function _M.rewrite(conf, ctx)
     local timestamp = core.request.header(ctx,"timestamp")
     local ts = tonumber(timestamp)
     if "nil" == ts then
-        return 400, {code = 100000, message = "wrong timestamp"}
+        return 400, {code = 100004, message = "非法请求，时间错误"}
     end
 
     local now = ngx.time()
     if math.abs(now - timestamp) > conf.timeout then
         core.log.info("request timeout, current time is ", now," ,request time is ",timestamp," timeout conf is ",conf.timeout)
-        return 400, {code = 100000, message = "请求超时"}
+        return 400, {code = 100005, message = "非法请求，超时请求"}
     end
 
     -- check signature
@@ -97,7 +97,7 @@ function _M.rewrite(conf, ctx)
     local request_sign = core.request.header(ctx,"sign")
     if request_sign ~= calculate_sign then
         core.log.info("check sign fail, request sign is ", request_sign," ,calculate sign is ",calculate_sign)
-        return 400, {code = 100000, message = "非法请求，签名错误"}
+        return 400, {code = 100006, message = "非法请求，签名错误"}
     end
 
     core.log.info("hit customer signature authorization rewrite")
