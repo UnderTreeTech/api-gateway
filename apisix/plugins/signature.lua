@@ -56,7 +56,7 @@ local function get_args(action)
     if action ~= "GET" then
         ngx.req.read_body()
         args = ngx.req.get_body_data()
-        if "nil" == type(json_body) then
+        if "nil" == type(args) then
             args = ""
         end
     else
@@ -69,6 +69,7 @@ local function get_args(action)
 end
 
 function _M.rewrite(conf, ctx)
+    --core.log.info("ctx.var info: " ,core.json.delay_encode(ctx.var,true))
     local args = get_args(ctx.var.request_method)
 
     -- check appkey
