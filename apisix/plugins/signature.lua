@@ -5,6 +5,7 @@
 ---
 
 local core     = require("apisix.core")
+local redis_new = require("resty.redis").new
 local ngx      = ngx
 local md5      = ngx.md5
 local encode_args = ngx.encode_args
@@ -21,7 +22,28 @@ local schema = {
             enum = {"md5"},
             default = "md5"
         },
-        timeout = {type = "integer", minimum = 10, default = 10}
+        timeout = {type = "integer", minimum = 10, default = 10},
+        anti_reply = {
+            type = "boolean",
+            default = true
+        },
+        policy = {
+            type = "string",
+            enum = {"redis"},
+            default = "redis"
+        },
+        redis_host = {
+            type = "string", minLength = 2, default = "127.0.0.1"
+        },
+        redis_port = {
+            type = "integer", minimum = 1, default = 6379
+        },
+        redis_password = {
+            type = "string", minLength = 0, default=""
+        },
+        redis_timeout = {
+            type = "integer", minimum = 1
+        },
     },
     required = {"appkey", "secret", "timeout", "algorithm"}
 }
@@ -52,24 +74,83 @@ function _M.check_schema(conf)
 end
 
 local function get_args(action)
-    local args
+    local query_params = ngx.req.get_uri_args()
+    local encode_query = encode_args(query_params)
+    local body = ""
     if action ~= "GET" then
         ngx.req.read_body()
-        args = ngx.req.get_body_data()
-        if "nil" == type(args) then
-            args = ""
+        body = ngx.req.get_body_data()
+        if "nil" == type(body) then
+            body = ""
         end
-    else
-        local query_params = ngx.req.get_uri_args()
-        args = encode_args(query_params)
     end
 
+    local args = encode_query .. body
     core.log.info("request original args is: ",args)
     return args
 end
 
+local function anti_reply(conf,key)
+    local is_attack = false
+    local red = redis_new()
+    local timeout = conf.redis_timeout or 1000    -- 1sec
+    red:set_timeouts(timeout, timeout, timeout)
+
+    local ok, err = red:connect(conf.redis_host, conf.redis_port or 6379)
+    if not ok then
+        core.log.error("failed to connect: ",err)
+        return is_attack
+    end
+
+    local count
+    count, err = red:get_reused_times()
+    core.log.info("reused times: ",count)
+    if 0 == count then
+        if conf.redis_password and conf.redis_password ~= '' then
+            local ok, err = red:auth(conf.redis_password)
+            if not ok then
+                core.log.error("authentication failed: ",err)
+                return is_attack
+            end
+        end
+    elseif err then
+         core.log.info("get_reused_times err: ", err)
+        return is_attack
+    end
+
+    key = "sign:" .. tostring(key)
+    local ret,err = red:get(key)
+    core.log.info("sign key: ", key," result: ",ret, " err: ",err)
+    if ret == ngx.null then
+        core.log.info("key does not exist: ", key)
+        red:setex(key,conf.timeout,"")
+    else
+        is_attack = true
+    end
+
+    red:set_keepalive(10000, 50)
+
+    return is_attack
+end
+
+
 function _M.rewrite(conf, ctx)
-    --core.log.info("ctx.var info: " ,core.json.delay_encode(ctx.var,true))
+    -- read nonce
+    local nonce = core.request.header(ctx,"nonce")
+    if "nil" == type(nonce) then
+        return 400, {code = 100004, message = "invalid nonce"}
+    end
+    core.log.info("nonce is:",nonce)
+
+    -- check reply request
+    if conf.anti_reply then
+        local attack = anti_reply(conf,nonce)
+        if attack then
+            return 400, {code = 100000,message = "repeat request"}
+        end
+    end
+
+    -- get request args, include query and body
     local args = get_args(ctx.var.request_method)
 
     -- check appkey
@@ -79,20 +160,20 @@ function _M.rewrite(conf, ctx)
     end
 
     -- check request timeout
-    local timestamp = core.request.header(ctx,"timestamp")
-    local ts = tonumber(timestamp)
-    if "nil" == ts then
-        return 400, {code = 100004, message = "非法请求，时间错误"}
+    local ts = core.request.header(ctx,"timestamp")
+    local timestamp = tonumber(ts)
+    if "nil" == type(timestamp) then
+        return 400, {code = 100004, message = "invalid timestamp"}
     end
 
     local now = ngx.time()
     if math.abs(now - timestamp) > conf.timeout then
         core.log.info("request timeout, current time is ", now," ,request time is ",timestamp," timeout conf is ",conf.timeout)
-        return 400, {code = 100005, message = "非法请求，超时请求"}
+        --return 400, {code = 100005, message = "request timeout"}
     end
 
     -- check signature
-    local unsign_text = args .. timestamp .. conf.secret
+    local unsign_text = args .. conf.secret .. ts .. nonce
     core.log.info("unsign text is: ", unsign_text)
     local calculate_sign = md5(unsign_text)
     local request_sign = core.request.header(ctx,"sign")
